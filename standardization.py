@@ -7,9 +7,6 @@ import argparse
 RDLogger.DisableLog('rdApp.*')
 
 def copy_properties(original_mol, new_mol):
-    """
-    Copies all properties from the original molecule to the new molecule.
-    """
     if original_mol and new_mol:
         for prop_name in original_mol.GetPropNames():
             new_mol.SetProp(prop_name, original_mol.GetProp(prop_name))
@@ -20,9 +17,9 @@ def neutralize_molecule(mol):
     modified = False
     for atom in mol.GetAtoms():
         charge = atom.GetFormalCharge()
-        if charge != 0 and atom.GetDegree() == 1:  # Check for terminal heteroatom
+        if charge != 0 and atom.GetDegree() == 1:  
             symbol = atom.GetSymbol()
-            if symbol in ["O", "N", "S", "P"]:  # Common heteroatoms
+            if symbol in ["O", "N", "S", "P"]:  
                 atom.SetFormalCharge(0)
                 if charge > 0:
                     mol.SetProp("Neutralization",f"Positive charge found in {symbol} atom at position {atom.GetIdx()+1}")
@@ -37,7 +34,6 @@ def neutralize_molecule(mol):
 
 def strip_salts(mol):
     fixes = []
-    # SMARTS patterns for salts
     salt_smarts = [
         "[H][#8][H]", "Cl[H]", "Br[H]", "I[H]", "F[H]", "[H][#8]-[#7+](-[#8-])=O",
         "[Na+]", "[Ca++]", "[K+]", "[Cl-]", "[Br-]", "[I-]", "Cl", "Br", "I",
@@ -72,23 +68,19 @@ def strip_salts(mol):
                 else:
                     mol = Chem.DeleteSubstructs(mol, salt)
                 salts_removed = True
-        fragments = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)  # Avoid sanitizing fragments prematurely
+        fragments = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)  
 
-    # If no fragments remain, return original molecule
     if not fragments:
         return mol, []
 
-    # Retain the largest fragment
     largest_fragment = max(fragments, key=lambda frag: frag.GetNumHeavyAtoms(), default=None)
     if largest_fragment is None or largest_fragment.GetNumHeavyAtoms() < 1:
         return mol, []
 
-    # Convert largest fragment back to molecule and sanitize minimally
     try:
         final_molecule = Chem.MolFromSmiles(Chem.MolToSmiles(largest_fragment, kekuleSmiles=False))
         Chem.AssignStereochemistry(final_molecule, cleanIt=True, force=True)
 
-        # Annotate with `_Error` and `_Fix` fields if salts were removed
         if salts_removed:
             final_molecule.SetProp("Salt detection", "Presence of salts were detected")
             fixes.append("Largest fragment retained after salt removal")
@@ -135,15 +127,11 @@ def main():
             continue
         original_mol = mol
 
-        # Neutralize charges
         mol, neutral_fixes = neutralize_molecule(mol)
         mol = copy_properties(original_mol, mol)
-
-        # Strip salts
         mol, salt_fixes = strip_salts(mol)
         mol = copy_properties(original_mol, mol)
 
-        # Process aromaticity
         mol, aromatic_fixes = process_aromaticity(mol)
         mol = copy_properties(original_mol, mol)
 
