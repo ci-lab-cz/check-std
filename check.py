@@ -246,10 +246,9 @@ def process_metal(mol):
             atom2.SetFormalCharge(atom2.GetFormalCharge() - 1)
             atom1.SetFormalCharge(atom1.GetFormalCharge() + 1)        
         Chem.SanitizeMol(mol)
-        fixes.append(f"Added dative bond: Atom {idx1+1}  → Atom {idx2+1}.")
-        modified = True
         fixes.append(f"Added dative bond: Atom {idx1+1} → Atom {idx2+1}.")
-        
+        modified = True
+
     if errors:
         mol.SetProp("Metal detection", "\n".join(errors))
 
@@ -306,39 +305,54 @@ def transformation(mol):
     except Exception as e:
         print(f"Error processing molecule: {e}")
         return None
-        
+
+
+def process_mol(mol):
+    try:
+        if mol is None or mol.GetNumAtoms() == 0:
+            return None, []
+        mol = process_molecule(mol)
+        mol, aromatic_fix = process_aromaticity(mol)
+        mol, metallocene_fix = process_metallocene(mol)
+        mol, metal_fix = process_metal(mol)
+        mol, incorrect_wedge_fix = clear_incorrectwedge(mol)
+        mol, non_standard_wedge_fix = process_nonstandardwedge(mol)
+        mol, non_stereo_wedge_fix = process_nonstereowedge(mol)
+        mol, transformation_fix = transformation(mol)
+        fixes = aromatic_fix + metallocene_fix + metal_fix + incorrect_wedge_fix + non_standard_wedge_fix + non_stereo_wedge_fix + transformation_fix
+        if fixes:
+            mol.SetProp("Fixes applied", "\n".join(fixes))
+        return mol, fixes
+    except Exception as e:
+        return e, []  # return an exception
+
+
 def main():
     parser = argparse.ArgumentParser(description="Process SDF files with various functionalities.")
     parser.add_argument("-i", "--input", required=True, help="Input SDF file")
     parser.add_argument("-o", "--output", required=True, help="Output SDF file")
+    parser.add_argument("-c", "--ncpu", required=False, type=int, default=1, help="CPU count")
     args = parser.parse_args()
+
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     supplier = Chem.SDMolSupplier(args.input, sanitize=False)
     writer = Chem.SDWriter(args.output)
     skipped_indices = []
-    for idx, mol in enumerate(supplier):
-        try:
-            if mol is None or mol.GetNumAtoms() == 0:
-                print(f"Warning: Molecule at index {idx} is invalid or empty.")
-                skipped_indices.append(idx)
-                placeholder = Chem.Mol()
-                placeholder.SetProp("Error", "Invalid or empty molecule")
-                writer.write(placeholder)
-                continue
-            mol = process_molecule(mol)
-            mol, aromatic_fix = process_aromaticity(mol)
-            mol, metallocene_fix = process_metallocene(mol)
-            mol, metal_fix = process_metal(mol)
-            mol, incorrect_wedge_fix = clear_incorrectwedge(mol)
-            mol, non_standard_wedge_fix = process_nonstandardwedge(mol)
-            mol, non_stereo_wedge_fix = process_nonstereowedge(mol)
-            mol, transformation_fix = transformation(mol)
-            fixes = aromatic_fix + metallocene_fix + metal_fix + incorrect_wedge_fix + non_standard_wedge_fix + non_stereo_wedge_fix + transformation_fix
-            if fixes:
-                mol.SetProp("Fixes applied", "\n".join(fixes))
-            writer.write(mol)
-        except Exception as e:
-            print(f"Error processing molecule at index {idx}: {e}")
+    placeholder = Chem.Mol()
+    placeholder.SetProp("Error", "Invalid or empty molecule")
+
+    pool = Pool(args.ncpu)
+    for idx, (mol, fixes) in enumerate(pool.imap(process_mol, supplier), 1):
+        if mol is None:
+            print(f"Warning: Molecule at index {idx} is invalid or empty.")
             skipped_indices.append(idx)
+            writer.write(placeholder)
+        elif isinstance(mol, Exception):
+            print(f"Error processing molecule at index {idx}: {mol}")
+            skipped_indices.append(idx)
+        else:
+            writer.write(mol)
+
     writer.close()
     print(f"Processing complete. Output written to {args.output}")
     if skipped_indices:
