@@ -1,7 +1,8 @@
 import argparse
+import numpy as np
+from multiprocessing import Pool
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdmolops, rdDepictor
-import numpy as np
 from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
@@ -15,6 +16,7 @@ TRANSITION_METALS = [
     57, 72, 73, 74, 75, 76, 77, 78, 79, 80   
 ]
 metals = ALKALI_METALS + ALKALINE_EARTH_METALS + TRANSITION_METALS
+
 
 def process_molecule(mol):
     errors = []
@@ -33,6 +35,7 @@ def process_molecule(mol):
 
     return mol
 
+
 def process_aromaticity(mol):
     fixes = []
     try:
@@ -40,15 +43,16 @@ def process_aromaticity(mol):
             mol.SetProp("Aromaticity Error", "Molecule contains aromatic bonds.")
             Chem.Kekulize(mol, clearAromaticFlags=True)
             if not any(bond.GetIsAromatic() for bond in mol.GetBonds()):
-                fixes.append("Dearomatized aromatic system.")
+                fixes.append("Kekulization applied.")
             else:
-                mol.SetProp("Aromaticity Error", "Dearomatization failed: Aromatic bonds remain.")
+                mol.SetProp("Aromaticity Error", "Kekulization failed: aromatic bonds remain.")
 
-        return mol,fixes
+        return mol, fixes
 
     except Exception as e:
-        mol.SetProp("Aromaticity Error", f"Unexpected error during dearomatization: {e}")
-        return mol,fixes
+        mol.SetProp("Aromaticity Error", f"Unexpected error during kekulization: {e}")
+        return mol, fixes
+
 
 def clear_incorrectwedge(mol):
     errors = []
@@ -76,16 +80,15 @@ def clear_incorrectwedge(mol):
     if errors:
         mol.SetProp("Incorrect Wedges", "; ".join(errors))
     
-    return mol,fixes
+    return mol, fixes
 
 
 def process_nonstereowedge(mol):
-    
+    fixes = []
     try:
         conf = mol.GetConformer()
         Chem.WedgeMolBonds(mol, conf)
         chiral_centers = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED]
-        fixes = []
         modified = False
         for bond in mol.GetBonds():
             if bond.GetStereo() in (Chem.BondStereo.STEREOATROPCW, Chem.BondStereo.STEREOATROPCCW):
@@ -107,39 +110,38 @@ def process_nonstereowedge(mol):
                     bond.SetStereo(Chem.BondStereo.STEREONONE) 
                     fixes.append(f"Cleared non-stereo wedge bond: Bond {bond.GetIdx()}")
                     modified = True
-
         if modified:
             mol.SetProp("Non-stereo wedge error", "Non-stereo wedge bonds detected")
     except Exception as e:
         mol.SetProp("_Error", f"Processing error: {str(e)}")
 
-    return mol,fixes
+    return mol, fixes
+
 
 def process_nonstandardwedge(mol):
-    
+    fixes = []
     try:
         conf = mol.GetConformer()
         Chem.WedgeMolBonds(mol, conf)
 
-        fixes = []
         for bond in mol.GetBonds():
             if bond.GetBondDir() in (Chem.BondDir.BEGINWEDGE, Chem.BondDir.BEGINDASH):
                 start_atom = bond.GetBeginAtom()
                 end_atom = bond.GetEndAtom()
-                mol.SetProp("Non standard wedge error",f"Non-standard wedges have been detected")
+                mol.SetProp("Non standard wedge error", f"Non-standard wedges have been detected")
                 if start_atom.GetAtomicNum() < end_atom.GetAtomicNum():
                     bond.SetBondDir(Chem.BondDir.BEGINDASH)
                 else:
                     bond.SetBondDir(Chem.BondDir.BEGINWEDGE)
-                fixes.append(f"Adjusted bond: {bond.GetIdx()}")
+                fixes.append(f"Adjusted wedge bond: {bond.GetIdx()}")
 
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-
 
     except Exception as e:
         mol.SetProp("_Error", f"Processing error: {str(e)}")
 
-    return mol,fixes
+    return mol, fixes
+
 
 def process_metallocene(mol):
     
@@ -159,7 +161,7 @@ def process_metallocene(mol):
         if len(cyclopentadienyl_rings) < 2:
             raise ValueError("Not enough cyclopentadienyl rings for metallocene processing.")
 
-        mol.SetProp("Metallocene detected",f"Metallocene atoms are detected and are not properly bonded with other atoms")
+        mol.SetProp("Metallocene detected", f"Metallocene atoms are detected and are not properly bonded with other atoms")
         ring1, ring2 = cyclopentadienyl_rings[:2]
         for ring in [ring1, ring2]:
             for atom_idx in ring:
@@ -179,7 +181,8 @@ def process_metallocene(mol):
         mol.AddBond(dummy1_idx, metal.GetIdx(), Chem.BondType.DATIVE)
         mol.AddBond(dummy2_idx, metal.GetIdx(), Chem.BondType.DATIVE)
         fixes.append("Dative bonds are added")
-    return mol,fixes
+    return mol, fixes
+
 
 def process_metal(mol):
 
@@ -202,11 +205,15 @@ def process_metal(mol):
             if ((a1_num in ALKALI_METALS + ALKALINE_EARTH_METALS and a2_num in HETEROATOMS) or
                 (a2_num in ALKALI_METALS + ALKALINE_EARTH_METALS and a1_num in HETEROATOMS)):
                 bonds_to_remove.append((atom1.GetIdx(), atom2.GetIdx()))
-                errors.append(f"Bonds detected between metal atom {atom1.GetIdx()+1 if a1_num in ALKALI_METALS + ALKALINE_EARTH_METALS else atom2.GetIdx()+1} and atom {atom2.GetIdx()+1 if a2_num in HETEROATOMS else atom1.GetIdx()+1}.")
+                errors.append(f"Bonds detected between metal atom "
+                              f"{atom1.GetIdx()+1 if a1_num in ALKALI_METALS + ALKALINE_EARTH_METALS else atom2.GetIdx()+1} "
+                              f"and atom {atom2.GetIdx()+1 if a2_num in HETEROATOMS else atom1.GetIdx()+1}.")
             if ((a1_num in TRANSITION_METALS and (a2_num in HETEROATOMS or a2_num == 6)) or
                 (a2_num in TRANSITION_METALS and (a1_num in HETEROATOMS or a1_num == 6))):
                 bonds_to_replace.append((atom1.GetIdx(), atom2.GetIdx()))
-                errors.append(f"Bonds detected between transitional metal atom {atom1.GetIdx()+1 if a1_num in TRANSITION_METALS else atom2.GetIdx()+1} and atom {atom2.GetIdx()+1 if a2_num in HETEROATOMS or a2_num == 6 else atom1.GetIdx()+1}.")
+                errors.append(f"Bonds detected between transitional metal atom "
+                              f"{atom1.GetIdx()+1 if a1_num in TRANSITION_METALS else atom2.GetIdx()+1} "
+                              f"and atom {atom2.GetIdx()+1 if a2_num in HETEROATOMS or a2_num == 6 else atom1.GetIdx()+1}.")
 
     for idx1, idx2 in bonds_to_remove:
         atom1 = mol.GetAtomWithIdx(idx1)
@@ -241,11 +248,13 @@ def process_metal(mol):
         Chem.SanitizeMol(mol)
         fixes.append(f"Added dative bond: Atom {idx1+1}  → Atom {idx2+1}.")
         modified = True
+        fixes.append(f"Added dative bond: Atom {idx1+1} → Atom {idx2+1}.")
         
     if errors:
         mol.SetProp("Metal detection", "\n".join(errors))
 
     return mol.GetMol(), fixes
+
 
 def transformation(mol):
 
@@ -292,7 +301,7 @@ def transformation(mol):
                 mol = Chem.MolFromSmiles(temp)
                 mol.SetProp("Transformation detected ","\n".join(error))
                 AllChem.Compute2DCoords(mol)
-        return mol,fixes
+        return mol, fixes
 
     except Exception as e:
         print(f"Error processing molecule: {e}")
