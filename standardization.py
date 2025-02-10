@@ -1,7 +1,6 @@
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.Chem import SDWriter
-from rdkit import RDLogger
+from rdkit import Chem, RDLogger
+from rdkit.Chem import AllChem, SDWriter
+from multiprocessing import Pool
 import argparse
 
 RDLogger.DisableLog('rdApp.*')
@@ -14,22 +13,24 @@ def copy_properties(original_mol, new_mol):
 
 def neutralize_molecule(mol):
     fixes = []
+    errors = []
     modified = False
     for atom in mol.GetAtoms():
         charge = atom.GetFormalCharge()
-        if charge != 0 and atom.GetDegree() == 1:  
+        if charge != 0:  
             symbol = atom.GetSymbol()
             if symbol in ["O", "N", "S", "P"]:  
                 atom.SetFormalCharge(0)
                 if charge > 0:
-                    mol.SetProp("Neutralization",f"Positive charge found in {symbol} atom at position {atom.GetIdx()+1}")
+                    errors.append(f"Positive charge found in {symbol} atom at position {atom.GetIdx()+1}")
                     atom.SetFormalCharge(0) 
-                    fixes.append(f"Neutralized positive charge on terminal {symbol}")
+                    fixes.append(f"Neutralized positive charge on atom {symbol}")
                 elif charge < 0:
-                    mol.SetProp("Neutralization",f"Negative charge found in {symbol} atom at position {atom.GetIdx()+1}")                    
+                    errors.append(f"Negative charge found in {symbol} atom at position {atom.GetIdx()+1}")
                     atom.SetFormalCharge(0)
-                    fixes.append(f"Neutralized negative charge on terminal {symbol}")
+                    fixes.append(f"Neutralized negative charge on atom {symbol}")
                 modified = True
+        mol.SetProp("Charges found","\n". join(errors))
     return mol, fixes
 
 def strip_salts(mol):
@@ -89,65 +90,62 @@ def strip_salts(mol):
     except Exception as e:
         return mol, []
 
-def process_aromaticity(mol):
-    fixes = []
-    if mol is None:
-        return mol, ["Molecule is None before aromaticity processing."]
 
+def process_mol(mol):
     try:
-        if any(bond.GetIsAromatic() for bond in mol.GetBonds()):
-            mol.SetProp("Aromaticity Error after salt removal", "Molecule contains aromatic bonds.")
-            Chem.Kekulize(mol, clearAromaticFlags=True)
-            if not any(bond.GetIsAromatic() for bond in mol.GetBonds()):
-                fixes.append("Dearomatized aromatic system after salt removal.")
-            else:
-                mol.SetProp("Aromaticity Error after salt removal", "Dearomatization failed: Aromatic bonds remain.")
-        return mol, fixes
-
-    except Exception as e:
-        if mol is not None:
-            mol.SetProp("Aromaticity Error after salt removal", f"Unexpected error during dearomatization: {e}")
-        return mol, fixes
-
-def main():
-    parser = argparse.ArgumentParser(description="Process SDF files to strip salts, neutralize charges, and clean 2D structures.")
-    parser.add_argument("-i", "--input", type=str, required=True, help="Path to the input SDF file.")
-    parser.add_argument("-o", "--output", type=str, required=True, help="Path to the output SDF file.")
-    args = parser.parse_args()
-    molecule = Chem.SDMolSupplier(args.input, sanitize=False)
-    writer = SDWriter(args.output)
-    skipped_indices = []
-    for idx, mol in enumerate(molecule):
         if mol is None or mol.GetNumAtoms() == 0:
-            print(f"Warning: Molecule at index {idx} is invalid or empty.")
-            skipped_indices.append(idx)
-            placeholder = Chem.Mol()
-            placeholder.SetProp("Error", "Invalid or empty molecule")
-            writer.write(placeholder)
-            continue
+            return None, []
         original_mol = mol
-
+        original_name = mol.GetProp('_Name') if mol.HasProp('_Name') else 'Unknown'
         mol, neutral_fixes = neutralize_molecule(mol)
-        mol = copy_properties(original_mol, mol)
         mol, salt_fixes = strip_salts(mol)
         mol = copy_properties(original_mol, mol)
-
-        mol, aromatic_fixes = process_aromaticity(mol)
-        mol = copy_properties(original_mol, mol)
-
-        fixes = neutral_fixes + salt_fixes + aromatic_fixes
+        mol.SetProp('_Name', original_name)
+        fixes = neutral_fixes + salt_fixes
         if mol.HasProp("Fixes applied") and fixes:
             existing_fixes = mol.GetProp("Fixes applied")
             new_fixes = f"{existing_fixes}\n" + "\n".join(fixes)
             mol.SetProp("Fixes applied", new_fixes)
         elif fixes:
             mol.SetProp("Fixes applied", "\n".join(fixes))
-        writer.write(mol)
+
+        return mol,fixes
+
+    except Exception as e:
+        return e, []  # return an exception
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Process SDF files with various functionalities.")
+    parser.add_argument("-i", "--input", required=True, help="Input SDF file")
+    parser.add_argument("-o", "--output", required=True, help="Output SDF file")
+    parser.add_argument("-c", "--ncpu", required=False, type=int, default=1, help="CPU count")
+    args = parser.parse_args()
+
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+    supplier = Chem.SDMolSupplier(args.input, sanitize=False)
+    writer = Chem.SDWriter(args.output)
+    skipped_indices = []
+    placeholder = Chem.Mol()
+    placeholder.SetProp("Error", "Invalid or empty molecule")
+
+    pool = Pool(args.ncpu)
+    for idx, (mol, fixes) in enumerate(pool.imap(process_mol, supplier), 1):
+        if mol is None:
+            print(f"Warning: Molecule at index {idx} is invalid or empty.")
+            skipped_indices.append(idx)
+            writer.write(placeholder)
+        elif isinstance(mol, Exception):
+            print(f"Error processing molecule at index {idx}: {mol}")
+            skipped_indices.append(idx)
+        else:
+            writer.write(mol)
 
     writer.close()
-    print(f"Processed SDF file saved to: {args.output}")
+    print(f"Processing complete. Output written to {args.output}")
+    if skipped_indices:
+        print(f"Skipped molecules at indices: {skipped_indices}")
 
 
 if __name__ == "__main__":
     main()
-
