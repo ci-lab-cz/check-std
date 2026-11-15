@@ -20,6 +20,41 @@ TRANSITION_METALS = [
 ]
 
 
+# properties set by check.py on molecules which failed the checks, such molecules are not standardized
+CHECK_ERROR_PROPS = ["Initial check error", "Valence error", "Kekulization error", "Processing error"]
+
+
+def has_check_error(mol):
+    return any(mol.HasProp(prop_name) for prop_name in CHECK_ERROR_PROPS)
+
+
+def update_summary_props(mol):
+    # check.py reports these values for the input structure, they may change after salt removal and neutralization
+    charge = Chem.GetFormalCharge(mol)
+    if charge:
+        mol.SetProp("Charge", str(charge))
+    elif mol.HasProp("Charge"):
+        mol.ClearProp("Charge")
+    ncomp = len(Chem.GetMolFrags(mol))
+    if ncomp > 1:
+        mol.SetProp("Number of components", str(ncomp))
+    elif mol.HasProp("Number of components"):
+        mol.ClearProp("Number of components")
+    return mol
+
+
+def write_unchanged(writer, mol):
+    # write a molecule as it is, structures with errors may fail on kekulization during writing
+    try:
+        writer.write(mol)
+    except Exception:
+        writer.SetKekulize(False)
+        try:
+            writer.write(mol)
+        finally:
+            writer.SetKekulize(True)
+
+
 def has_metal(mol):
     return any(atom.GetAtomicNum() in TRANSITION_METALS for atom in mol.GetAtoms())
 
@@ -146,11 +181,25 @@ def main():
     molecule = Chem.SDMolSupplier(args.input, sanitize=False)
     writer = SDWriter(args.output)
     for idx, mol in enumerate(molecule):
-        if mol is None or mol.GetNumAtoms() == 0:
-            print(f"Warning: Molecule at index {idx} is invalid or empty.")
+        # every input record is written to the output to keep the same number and order of records
+        if mol is None:
+            print(f"Warning: Molecule at index {idx} is invalid.")
             placeholder = Chem.Mol()
             placeholder.SetProp("Error", "Invalid or empty molecule")
             writer.write(placeholder)
+            continue
+
+        if mol.GetNumAtoms() == 0:
+            print(f"Warning: Molecule at index {idx} is empty.")
+            # keep the name and properties of the record
+            if not has_check_error(mol):
+                mol.SetProp("Error", "Invalid or empty molecule")
+            writer.write(mol)
+            continue
+
+        if has_check_error(mol):
+            # molecules flagged by check.py are passed through unmodified
+            write_unchanged(writer, mol)
             continue
 
         input_aromatic = any(bond.GetIsAromatic() for bond in mol.GetBonds())
@@ -172,6 +221,7 @@ def main():
             mol.SetProp("Fixes applied", new_fixes)
         elif fixes:
             mol.SetProp("Fixes applied", "\n".join(fixes))
+        update_summary_props(mol)
         writer.write(mol)
 
     writer.close()
